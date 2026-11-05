@@ -46,7 +46,7 @@ export function publishGate(
   return { status: wantsPublish ? "PUBLISHED" : "DRAFT" };
 }
 
-/** Authoritative public eligibility: the DynamoDB state wins over any flag inside the cached body.
+/** Authoritative public eligibility: the D1 state wins over any flag inside the cached body.
  * Records written before states existed (no status) fall back to the body flag. */
 export function isPublicEligible(status: string | undefined, bodyPublished: boolean): boolean {
   if (status === undefined || status === "") return bodyPublished;
