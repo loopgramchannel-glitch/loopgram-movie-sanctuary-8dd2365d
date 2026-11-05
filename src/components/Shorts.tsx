@@ -202,7 +202,7 @@ function ShortSlide({ post, active, warm, muted, setMuted, onShare }: { post: Po
           : <PostThumb post={post} className="absolute inset-0 h-full w-full" />
       ) : (
         <>
-          <video ref={ref} poster={post.imageUrl || undefined} playsInline loop preload={active || warm ? "auto" : "none"} draggable={false} muted={muted}
+          <video ref={ref} playsInline loop preload={active || warm ? "auto" : "none"} draggable={false} muted={muted}
             onClick={toggle} className="absolute inset-0 h-full w-full object-contain" />
         </>
       )}
