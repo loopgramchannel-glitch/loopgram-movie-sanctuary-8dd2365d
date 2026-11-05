@@ -2,7 +2,7 @@
 
 ## Environment variables (placeholders only)
 Public (safe in browser, served by getPublicConfig): GOOGLE_API_KEY (Firebase web key), FIREBASE_AUTH_DOMAIN, FIREBASE_PROJECT_ID, FIREBASE_APP_ID, FIREBASE_MESSAGING_SENDER_ID, FIREBASE_STORAGE_BUCKET
-Secret (server only): FIREBASE_CLIENT_EMAIL=<sa@project.iam.gserviceaccount.com>, FIREBASE_PRIVATE_KEY=<-----BEGIN PRIVATE KEY-----...>, OWNER_UID=<uid>, plus existing AWS_*, R2_*, UPSTASH_*, ALGOLIA_ADMIN_API_KEY, TMDB_*, TURNSTILE_SECRET_KEY, CLOUDFLARE_API_TOKEN.
+Secret (server only): FIREBASE_CLIENT_EMAIL=<sa@project.iam.gserviceaccount.com>, FIREBASE_PRIVATE_KEY=<-----BEGIN PRIVATE KEY-----...>, OWNER_UID=<uid>, plus existing R2_*, UPSTASH_*, ALGOLIA_ADMIN_API_KEY, TMDB_*, TURNSTILE_SECRET_KEY, CLOUDFLARE_API_TOKEN.
 
 ## Owner role
 Owner = OWNER_UID, or a Firebase custom claim `{"role":"owner"}` set by a trusted admin script (Identity Toolkit `accounts:update` with `customAttributes`). Sign-up never sets roles. Studio cannot disable the owner.
@@ -16,7 +16,7 @@ Owner = OWNER_UID, or a Firebase custom claim `{"role":"owner"}` set by a truste
 ## Secret rotation (required — keys were shared in chat)
 Rotate in this order, then update each value in Lovable → Project Settings → Secrets and re-open Studio → Integrations & Health to confirm green:
 1. Firebase service account key (GCP → IAM → Service accounts → Keys: add new, delete old)
-2. AWS secret key (IAM → user → security credentials) — scope to SQS queue, DynamoDB table, CloudWatch log group only
+2. AWS secret key (IAM → user → security credentials) — scope to D1 job queue queue, Cloudflare D1 table, platform logs log group only
 3. R2 keys, Cloudflare API token, Turnstile secret
 4. Algolia admin key, Upstash token, TMDB token
 
