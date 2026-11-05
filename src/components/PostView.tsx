@@ -204,11 +204,17 @@ function NativePlayer({ url, poster }: { url: string; poster?: string | undefine
   const [buffering, setBuffering] = useState(false);
   const [frame, setFrame] = useState<string | undefined>(poster || undefined);
   const [error, setError] = useState(false);
+  const [mutedAuto, setMutedAuto] = useState(false);
+  void frame; void setFrame; void captureFrame;
+  useEffect(() => { setStarted(true); setError(false); setRatio(null); setMutedAuto(false); setBuffering(true); }, [url, poster]);
   useEffect(() => {
-    setStarted(false); setError(false); setRatio(null); setFrame(poster || undefined);
-    if (!poster) captureFrame(url).then((r) => { if (r) setFrame(r.img); });
-  }, [url, poster]);
-  useEffect(() => { const v = ref.current; if (!v) return; return attachSource(v, url); }, [url]);
+    const v = ref.current; if (!v) return;
+    const detach = attachSource(v, url);
+    // YouTube-style: start right away with sound; if the browser blocks that, play muted and offer an unmute button.
+    v.muted = false;
+    v.play().catch(() => { v.muted = true; setMutedAuto(true); v.play().catch(() => { setStarted(false); setBuffering(false); }); });
+    return detach;
+  }, [url]);
   const r = ratio ?? 16 / 9;
   const portrait = r < 1;
   const play = () => { const v = ref.current; if (!v) return; setStarted(true); setBuffering(true); v.play().catch(() => setBuffering(false)); };
@@ -220,7 +226,7 @@ function NativePlayer({ url, poster }: { url: string; poster?: string | undefine
   return (
     <div className="relative flex w-full justify-center overflow-hidden bg-black sm:rounded-xl">
       <div className="relative w-full" style={{ ...boxStyle, transform: "translateZ(0)" }}>
-        <video ref={ref} poster={frame} crossOrigin="anonymous" controls={started} playsInline preload="metadata" className="absolute inset-0 block h-full w-full object-contain"
+        <video ref={ref} crossOrigin="anonymous" controls={started} autoPlay playsInline preload="auto" className="absolute inset-0 block h-full w-full object-contain"
           onLoadedMetadata={(e) => { const v = e.currentTarget; v.playbackRate = 1; v.defaultPlaybackRate = 1; if (v.videoWidth && v.videoHeight) setRatio(Math.min(4, Math.max(0.25, v.videoWidth / v.videoHeight))); }}
           onPlay={() => { setStarted(true); if (!playingRef.current) { playingRef.current = true; markPlaying(true); } }}
           onPause={() => { if (playingRef.current) { playingRef.current = false; markPlaying(false); } }}
@@ -232,6 +238,9 @@ function NativePlayer({ url, poster }: { url: string; poster?: string | undefine
               <Play className="ml-1 h-8 w-8 fill-current sm:h-10 sm:w-10" />
             </span>
           </button>
+        )}
+        {mutedAuto && started && !error && (
+          <button onClick={() => { const v = ref.current; if (v) { v.muted = false; v.play().catch(() => {}); } setMutedAuto(false); }} className="absolute left-3 top-3 z-10 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-lg">Tap to unmute</button>
         )}
         {started && buffering && !error && <div className="pointer-events-none absolute inset-0 grid place-items-center"><div className="h-12 w-12 animate-spin rounded-full border-4 border-muted-foreground/40 border-t-primary" aria-label="Loading video" /></div>}
         {error && (
