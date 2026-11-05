@@ -16,7 +16,7 @@ Owner = OWNER_UID, or a Firebase custom claim `{"role":"owner"}` set by a truste
 ## Secret rotation (required — keys were shared in chat)
 Rotate in this order, then update each value in Lovable → Project Settings → Secrets and re-open Studio → Integrations & Health to confirm green:
 1. Firebase service account key (GCP → IAM → Service accounts → Keys: add new, delete old)
-2. AWS secret key (IAM → user → security credentials) — scope to D1 job queue queue, Cloudflare D1 table, platform logs log group only
+2. Cloudflare D1 token (My Profile → API Tokens) — scope to Account → D1 → Edit only
 3. R2 keys, Cloudflare API token, Turnstile secret
 4. Algolia admin key, Upstash token, TMDB token
 

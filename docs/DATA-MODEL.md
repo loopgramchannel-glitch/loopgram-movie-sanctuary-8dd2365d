@@ -23,4 +23,4 @@ file must exist and its first bytes must be a real video/picture (`sniffMime`) â
 - Video dimension checks are browser-side only.
 - D1 job queue + platform logs blocked by IAM permissions; Cloudflare token lacks zone access.
 - No measured capacity. 3 billion users is a goal; staged load tests need your approval and a budget.
-- Backups: turn on Cloudflare D1 Point-in-Time Recovery in the AWS console (needs your approval).
+- Backups: Cloudflare D1 Time Travel keeps 30 days of restore points automatically.
