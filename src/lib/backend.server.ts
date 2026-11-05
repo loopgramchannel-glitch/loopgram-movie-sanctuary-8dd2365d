@@ -1,4 +1,4 @@
-// Server-only clients: Upstash Redis, DynamoDB, R2. Env read per call (Workers).
+// Server-only clients: Upstash Redis, Cloudflare D1, R2. Env read per call (Workers).
 import { AwsClient } from "aws4fetch";
 
 const env = (k: string) => process.env[k] ?? "";
@@ -95,32 +95,40 @@ export function localRateLimit(key: string, limit = 120, windowMs = 60_000): boo
   return true;
 }
 
-// ---------- AWS / DynamoDB ----------
-function aws() {
-  return new AwsClient({
-    accessKeyId: env("AWS_ACCESS_KEY_ID"), secretAccessKey: env("AWS_SECRET_ACCESS_KEY"),
-    region: env("AWS_REGION") || "eu-north-1", service: "dynamodb",
-  });
+// ---------- Cloudflare D1 (permanent database, HTTP API) ----------
+export type D1Stmt = { sql: string; params?: (string | number | null)[] };
+export type D1Result<T = Record<string, unknown>> = { results: T[]; meta: { changes?: number; rows_read?: number } };
+export function d1Configured(): boolean {
+  return !!(env("CLOUDFLARE_ACCOUNT_ID") && env("CLOUDFLARE_D1_DATABASE_ID") && env("CLOUDFLARE_D1_TOKEN"));
 }
-export async function dynamo(op: string, body: unknown) {
-  const region = env("AWS_REGION") || "eu-north-1";
-  const r = await aws().fetch(`https://dynamodb.${region}.amazonaws.com/`, {
-    method: "POST",
-    headers: { "X-Amz-Target": `DynamoDB_20120810.${op}`, "Content-Type": "application/x-amz-json-1.0" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(4000),
-  });
-  const text = await r.text();
-  if (!r.ok) throw new Error(`DynamoDB ${op} ${r.status}: ${text.slice(0, 300)}`);
-  return JSON.parse(text);
+/** Runs statements in one round trip. Several statements run as one transaction (all or nothing). */
+export async function d1Batch(stmts: D1Stmt[]): Promise<D1Result[]> {
+  if (!d1Configured()) throw new Error("D1 not configured (CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_D1_DATABASE_ID / CLOUDFLARE_D1_TOKEN)");
+  const url = `https://api.cloudflare.com/client/v4/accounts/${env("CLOUDFLARE_ACCOUNT_ID")}/d1/database/${env("CLOUDFLARE_D1_DATABASE_ID")}/query`;
+  const body = stmts.length === 1 ? { sql: stmts[0]!.sql, params: stmts[0]!.params ?? [] } : { batch: stmts.map((s) => ({ sql: s.sql, params: s.params ?? [] })) };
+  let last = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(url, {
+        method: "POST", signal: AbortSignal.timeout(6000),
+        headers: { Authorization: `Bearer ${env("CLOUDFLARE_D1_TOKEN")}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const t = await r.text();
+      if (r.ok) {
+        const j = JSON.parse(t) as { success: boolean; result: D1Result[]; errors?: { message: string }[] };
+        if (j.success) return j.result;
+        throw new Error(`D1 error: ${j.errors?.[0]?.message ?? "unknown"}`);
+      }
+      last = `D1 ${r.status}: ${t.slice(0, 300)}`;
+      if (r.status < 500 && r.status !== 429) break; // permanent (bad SQL, constraint, permission)
+    } catch (e) { last = String(e); if (/D1 error/.test(last)) break; }
+    await new Promise((res) => setTimeout(res, 150 * 2 ** attempt));
+  }
+  throw new Error(last);
 }
-let tableKey: { pk: string; sk: string | undefined } | null = null;
-export async function tableSchema() {
-  if (tableKey) return tableKey as { pk: string; sk: string | undefined };
-  const d = await dynamo("DescribeTable", { TableName: env("DYNAMODB_TABLE_NAME") });
-  const ks = d.Table.KeySchema as { AttributeName: string; KeyType: string }[];
-  tableKey = { pk: ks.find((k) => k.KeyType === "HASH")!.AttributeName, sk: ks.find((k) => k.KeyType === "RANGE")?.AttributeName };
-  return tableKey as { pk: string; sk: string | undefined };
+export async function d1<T = Record<string, unknown>>(sql: string, params: (string | number | null)[] = []): Promise<D1Result<T>> {
+  return (await d1Batch([{ sql, params }]))[0] as D1Result<T>;
 }
 /** Per-isolate throttle for side jobs triggered by views : true at most once per window per key. */
 const sideJobAt = new Map<string, number>();
