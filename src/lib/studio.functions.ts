@@ -47,30 +47,55 @@ export const whoami = createServerFn({ method: "POST" }).inputValidator((d: unkn
   catch (e) { return { ok: false as const, status: e instanceof AuthError ? e.status : 401 }; }
 });
 
-type Check = { name: string; status: "ok" | "down" | "not_configured"; ms?: number; note?: string };
-async function timed(name: string, needed: string[], fn: () => Promise<unknown>): Promise<Check> {
-  if (needed.some((k) => !process.env[k])) return { name, status: "not_configured" };
+type Key = { name: string; set: boolean; required: boolean };
+type Check = { name: string; status: "ok" | "down" | "not_configured"; ms?: number; note?: string; keys: Key[] };
+/** Every key the site uses, per service. Only names and "set / missing" ever leave the server — never values. */
+export const SERVICE_KEYS: Record<string, { required: string[]; optional?: string[] }> = {
+  "Firebase Authentication": { required: ["GOOGLE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_AUTH_DOMAIN", "FIREBASE_APP_ID", "FIREBASE_CLIENT_EMAIL", "FIREBASE_PRIVATE_KEY", "OWNER_UID"], optional: ["FIREBASE_MESSAGING_SENDER_ID", "FIREBASE_STORAGE_BUCKET", "GOOGLE_ANALYTICS_MEASUREMENT_ID"] },
+  "Cloudflare D1 database": { required: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_D1_DATABASE_ID", "CLOUDFLARE_D1_TOKEN"] },
+  "Job queue (D1)": { required: ["CLOUDFLARE_D1_DATABASE_ID", "SEARCH_SYNC_SECRET"] },
+  "Upstash Redis": { required: ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"] },
+  "Cloudflare R2": { required: ["R2_ENDPOINT", "R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PUBLIC_URL"] },
+  "Algolia": { required: ["ALGOLIA_APP_ID", "ALGOLIA_ADMIN_API_KEY"] },
+  "Turnstile": { required: ["TURNSTILE_SECRET_KEY"] },
+  "Cloudflare account": { required: ["CLOUDFLARE_API_TOKEN"], optional: ["CLOUDFLARE_ZONE_ID"] },
+};
+const keysFor = (name: string): Key[] => {
+  const k = SERVICE_KEYS[name] ?? { required: [] };
+  return [...k.required.map((n) => ({ name: n, set: !!process.env[n]?.trim(), required: true })), ...(k.optional ?? []).map((n) => ({ name: n, set: !!process.env[n]?.trim(), required: false }))];
+};
+async function timed(name: string, fn: () => Promise<unknown>): Promise<Check> {
+  const keys = keysFor(name);
+  if (keys.some((k) => k.required && !k.set)) return { name, status: "not_configured", keys };
   const t = Date.now();
-  try { await fn(); return { name, status: "ok", ms: Date.now() - t }; }
-  catch (e) { return { name, status: "down", ms: Date.now() - t, note: String(e).replace(/[A-Za-z0-9_-]{24,}/g, "…").slice(0, 120) }; }
+  try { await fn(); return { name, status: "ok", ms: Date.now() - t, keys }; }
+  catch (e) { return { name, status: "down", ms: Date.now() - t, note: String(e).replace(/[A-Za-z0-9_-]{24,}/g, "…").slice(0, 120), keys }; }
 }
 
 export const studioHealth = createServerFn({ method: "POST" }).inputValidator((d: unknown) => tok.parse(d)).handler(async ({ data }) => {
   await owner(data.token);
   const b = await import("./backend.server");
   const checks = await Promise.all([
-    timed("Firebase Authentication", ["FIREBASE_PROJECT_ID", "FIREBASE_PRIVATE_KEY"], async () => { const { idt } = await import("./auth.server"); await idt("accounts:query", { returnUserInfo: false, limit: "1" }); }),
-    timed("Upstash Redis", ["UPSTASH_REDIS_REST_URL"], async () => { if ((await b.redis(["PING"])) !== "PONG") throw new Error("no PONG"); }),
-    timed("DynamoDB", ["DYNAMODB_TABLE_NAME", "AWS_SECRET_ACCESS_KEY"], () => b.dynamo("DescribeTable", { TableName: process.env["DYNAMODB_TABLE_NAME"] })),
-    timed("Amazon SQS", ["SQS_QUEUE_URL"], async () => { const { queueStats } = await import("./queue.server"); await queueStats(); }),
-    timed("Cloudflare R2", ["R2_ENDPOINT", "R2_SECRET_ACCESS_KEY"], () => listR2("", 1)),
-    timed("Algolia", ["ALGOLIA_APP_ID", "ALGOLIA_ADMIN_API_KEY"], async () => {
+    timed("Firebase Authentication", async () => { const { idt } = await import("./auth.server"); await idt("accounts:query", { returnUserInfo: false, limit: "1" }); }),
+    timed("Upstash Redis", async () => { if ((await b.redis(["PING"])) !== "PONG") throw new Error("no PONG"); }),
+    timed("Cloudflare D1 database", async () => {
+      const r = await b.d1<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('posts','site_settings','post_stats','post_views','post_votes','jobs','stat_jobs_done')");
+      if (Number(r.results[0]?.n) !== 7) throw new Error("Some tables are missing — run db/schema.sql");
+    }),
+    timed("Job queue (D1)", async () => { const { queueStats } = await import("./queue.server"); await queueStats(); }),
+    timed("Cloudflare R2", () => listR2("", 1)),
+    timed("Algolia", async () => {
       const r = await fetch(`https://${process.env["ALGOLIA_APP_ID"]}-dsn.algolia.net/1/indexes?page=0&hitsPerPage=1`, { headers: { "X-Algolia-Application-Id": process.env["ALGOLIA_APP_ID"]!, "X-Algolia-API-Key": process.env["ALGOLIA_ADMIN_API_KEY"]! }, signal: AbortSignal.timeout(5000) });
       if (!r.ok) throw new Error(`status ${r.status}`);
     }),
-    timed("Turnstile", ["TURNSTILE_SECRET_KEY"], async () => {}),
+    timed("Turnstile", async () => {}),
+    timed("Cloudflare account", async () => {
+      const r = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", { headers: { Authorization: `Bearer ${process.env["CLOUDFLARE_API_TOKEN"]}` }, signal: AbortSignal.timeout(5000) });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+    }),
   ]);
-  checks[checks.length - 1]!.note = "Secret is set; verified only when a form sends a token.";
+  const ts = checks.find((c) => c.name === "Turnstile");
+  if (ts && ts.status === "ok") ts.note = "Secret is set; verified only when a form sends a token.";
   return { checks, at: new Date().toISOString() };
 });
 

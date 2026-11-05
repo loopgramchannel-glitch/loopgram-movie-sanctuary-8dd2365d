@@ -163,7 +163,7 @@ function Overview() {
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Registered accounts" value={d.accounts ?? <Unavailable />} note="Firebase Authentication, all time" />
-        <Stat label="Jobs waiting" value={d.queue ? d.queue.waiting : <Unavailable />} note="Amazon SQS (approximate)" />
+        <Stat label="Jobs waiting" value={d.queue ? d.queue.waiting : <Unavailable />} note="Cloudflare D1 queue" />
         <Stat label="Failed jobs" value={d.queue ? d.queue.dead : <Unavailable />} note="Dead-letter list" />
         <Stat label="Announcement" value={d.settings.bannerOn ? "Live" : "Off"} note={d.settings.maintenance ? "Maintenance mode ON" : "Site open"} />
       </div>
@@ -400,11 +400,11 @@ function JobsPanel() {
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-3">
-        <Stat label="Waiting" value={s ? s.waiting : <Unavailable />} note="Amazon SQS, approximate" />
+        <Stat label="Waiting" value={s ? s.waiting : <Unavailable />} note="Cloudflare D1 queue" />
         <Stat label="Running" value={s ? s.inFlight : <Unavailable />} note="Received, not finished" />
         <Stat label="Failed (dead-lettered)" value={s ? s.dead : <Unavailable />} note="After 5 tries" />
       </div>
-      {!s && <p className="text-sm text-muted-foreground">The queue didn't answer. Your AWS key may still be missing SQS permissions.</p>}
+      {!s && <p className="text-sm text-muted-foreground">The queue didn't answer. Check the Cloudflare D1 keys on the Health page.</p>}
       <button disabled={m.isPending} onClick={() => m.mutate()} className="inline-flex items-center gap-1 rounded-lg border px-4 py-2 text-sm disabled:opacity-60">{m.isPending && <Loader2 className="h-4 w-4 animate-spin" />}Process up to 10 jobs now</button>
       <p className="text-xs text-muted-foreground">Jobs are safe to re-run: each has a done-marker, so nothing is indexed twice.</p>
     </div>
@@ -427,11 +427,22 @@ function HealthPanel() {
               <div className="font-semibold">{c.name}</div>
               <div className={`text-sm ${c.status === "down" ? "text-destructive" : "text-muted-foreground"}`}>{c.status === "ok" ? `Working${c.ms != null ? ` · ${c.ms} ms` : ""}` : c.status === "down" ? "Not responding" : "Not configured"}</div>
               {c.note && <div className="mt-1 break-words text-xs text-muted-foreground">{c.note}</div>}
+              {c.keys.length > 0 && (
+                <ul className="mt-2 space-y-0.5">
+                  {c.keys.map((k) => (
+                    <li key={k.name} className="flex items-center gap-2 text-[11px]">
+                      <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${k.set ? "bg-primary" : k.required ? "bg-destructive" : "bg-muted-foreground/40"}`} />
+                      <code className="truncate">{k.name}</code>
+                      <span className={k.set ? "text-muted-foreground" : k.required ? "text-destructive" : "text-muted-foreground"}>{k.set ? "set" : k.required ? "missing" : "optional, not set"}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         ))}
       </div>
-      <p className="flex items-center gap-1 text-xs text-muted-foreground"><Database className="h-3 w-3" />Cloudflare zone controls and CloudWatch dashboards aren't checked here yet.</p>
+      <p className="flex items-center gap-1 text-xs text-muted-foreground"><Database className="h-3 w-3" />Key values are never shown here. To add or change a key, update it in your project's secret settings, then press Check again.</p>
     </div>
   );
 }
