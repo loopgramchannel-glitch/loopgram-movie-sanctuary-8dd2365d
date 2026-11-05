@@ -1,5 +1,5 @@
 // Pure, browser-safe helpers shared by the indexer and tests. No secrets here.
-/** Index job contract: rebuild the posts index. A future SQS consumer can call the same handler. */
+/** Index job contract: rebuild the posts index. The D1 job queue can call the same handler. */
 export type SearchJob = { kind: "reconcile" };
 
 /** Algolia index for owner posts (the only searchable content). */

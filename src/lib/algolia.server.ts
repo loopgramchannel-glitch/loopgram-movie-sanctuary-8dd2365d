@@ -1,5 +1,5 @@
 // Server-only Algolia indexing. Uses the admin key; never import from browser code.
-import { dynamo, redis } from "./backend.server";
+import { d1, redis } from "./backend.server";
 import { POSTS_INDEX, POSTS_INDEX_SETTINGS, postRecord, type PostRecord, type SearchJob } from "./search-index";
 
 function creds() {
@@ -47,25 +47,21 @@ export async function syncPost(p: Parameters<typeof postRecord>[0], status: stri
 }
 export const unindexPost = (id: string) => syncPost({ id, title: "", text: "", category: "", imageUrl: "", videoUrl: "", createdAt: 0 }, "DELETED");
 
-/** Rebuilds the posts index from DynamoDB (the source of truth): published posts in, everything else out. */
+/** Rebuilds the posts index from D1 (the source of truth): published posts in, everything else out. */
 export async function reconcilePosts() {
-  const r = await dynamo("Query", {
-    TableName: process.env["DYNAMODB_TABLE_NAME"],
-    KeyConditionExpression: "PK = :p AND begins_with(SK, :s)",
-    ExpressionAttributeValues: { ":p": { S: "OWNER#site" }, ":s": { S: "POST#" } },
-  });
+  const r = await d1<{ body: string; status: string }>("SELECT body, status FROM posts");
   const records: PostRecord[] = [];
-  for (const it of r.Items ?? []) {
-    try { const rec = postRecord(JSON.parse(it.body?.S ?? "{}"), it.status?.S ?? ""); if (rec) records.push(rec); } catch { /* skip bad row */ }
+  for (const it of r.results) {
+    try { const rec = postRecord(JSON.parse(it.body ?? "{}"), it.status ?? ""); if (rec) records.push(rec); } catch { /* skip bad row */ }
   }
   await algolia("PUT", `${pidx}/settings`, POSTS_INDEX_SETTINGS);
   await algolia("POST", `${pidx}/clear`);
   if (records.length) await algolia("POST", `${pidx}/batch`, { requests: records.map((body) => ({ action: "updateObject", body })) });
   await redis(["DEL", POST_RETRY]).catch(() => {});
-  return { posts: (r.Items ?? []).length, indexed: records.length };
+  return { posts: r.results.length, indexed: records.length };
 }
 
-/** Single job handler — the same entry point a future SQS consumer will call. Idempotent. */
+/** Single job handler — the same entry point the D1 job queue calls. Idempotent. */
 export async function handleSearchJob(job: SearchJob): Promise<unknown> {
   if (job.kind === "reconcile") return reconcilePosts();
   return null;

@@ -14,7 +14,7 @@ export async function heartbeat() {
     let s: { autoQueue?: boolean } | null = null; try { s = raw ? JSON.parse(raw) : null; } catch { /* defaults */ }
     let batch: unknown = "paused";
     if (s?.autoQueue !== false) {
-      const { processBatch } = await import("./sqs.server");
+      const { processBatch } = await import("./queue.server");
       const { handleSearchJob } = await import("./algolia.server");
       batch = await Promise.all([1, 2, 3].map(() => processBatch(handleSearchJob, 10))).catch((e) => ({ error: String(e).slice(0, 200) }));
     }

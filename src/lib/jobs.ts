@@ -1,10 +1,10 @@
-// Pure, testable job-queue rules shared by the SQS producer/consumer.
+// Pure, testable job-queue rules shared by the D1 queue producer/consumer.
 import type { SearchJob } from "./search-index";
 
 export const MAX_RECEIVES = 5; // after this many failed deliveries a message is dead-lettered
 /** Like/view delta for one post. `bid` is unique per message so a redelivered message is applied once. */
 export type StatJob = { kind: "poststat"; bid: string; id: string; views: number; likes: number; dislikes: number };
-/** "New owner video uploaded": picked up by scripts/sqs-transcode-worker.ts (ffmpeg), never by the web worker. */
+/** "New owner video uploaded": picked up by scripts/transcode-worker.ts (ffmpeg), never by the web worker. */
 export type TranscodeJob = { kind: "transcode"; key: string };
 export type AnyJob = SearchJob | StatJob | TranscodeJob;
 /** Owner source videos that get an HLS copy at the same stem hlsFor() looks up. */
@@ -38,7 +38,7 @@ export function coalesceStats(jobs: StatJob[]): Map<string, { views: number; lik
   }
   return m;
 }
-/** Exponential backoff with full jitter, in seconds, capped at 15 minutes (SQS visibility limit we allow). */
+/** Exponential backoff with full jitter, in seconds, capped at 15 minutes (longest retry delay we allow). */
 export function backoffSeconds(receiveCount: number, rand = Math.random()): number {
   const cap = Math.min(900, 10 * 2 ** Math.max(0, receiveCount - 1));
   return Math.max(1, Math.floor(cap * rand));
