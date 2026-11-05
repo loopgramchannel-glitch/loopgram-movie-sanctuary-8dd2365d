@@ -10,17 +10,17 @@ Table `LoopgramContent`: PK (string) + SK (string). No GSIs. Everything below li
 
 ## Source A — TMDB
 `tmdb()` → L1 → Redis → TMDB → validate (`validateTmdbBody`) → merge (`mergeCatalog`, never erases good fields,
-`stripOwnerFields`) → DynamoDB. Reads fall back to DynamoDB when TMDB is off, revoked (401/403), rate-limited or down.
+`stripOwnerFields`) → Cloudflare D1. Reads fall back to Cloudflare D1 when TMDB is off, revoked (401/403), rate-limited or down.
 
 ## Source B — Owner posts
 Studio save → `requireOwner` → URL must map to `media/…` in R2 (`mediaKeyFromUrl`, no traversal) → R2 probe:
-file must exist and its first bytes must be a real video/picture (`sniffMime`) → `publishGate` → DynamoDB write
+file must exist and its first bytes must be a real video/picture (`sniffMime`) → `publishGate` → Cloudflare D1 write
 → Redis cache refresh → audit. Rejected posts are never saved or shown. Retries reuse the same post id (no duplicates).
 
 ## Not done yet (honest list)
 - Scheduled bulk TMDB ingestion and Algolia indexing of owner posts.
 - Server-side transcoding / thumbnail generation / malware scanning (needs a media-processing service — approval required).
 - Video dimension checks are browser-side only.
-- SQS + CloudWatch blocked by IAM permissions; Cloudflare token lacks zone access.
+- D1 job queue + platform logs blocked by IAM permissions; Cloudflare token lacks zone access.
 - No measured capacity. 3 billion users is a goal; staged load tests need your approval and a budget.
-- Backups: turn on DynamoDB Point-in-Time Recovery in the AWS console (needs your approval).
+- Backups: Cloudflare D1 Time Travel keeps 30 days of restore points automatically.
