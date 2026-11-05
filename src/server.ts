@@ -49,6 +49,9 @@ export default {
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
+      // Background import + queue drain after the response (never blocks the visitor).
+      const wait = (ctx as { waitUntil?: (p: Promise<unknown>) => void } | undefined)?.waitUntil;
+      if (wait) wait.call(ctx, import("./lib/heartbeat.server").then((m) => m.heartbeat()).catch(() => {}));
       return await normalizeCatastrophicSsrResponse(response);
     } catch (error) {
       console.error(error);
