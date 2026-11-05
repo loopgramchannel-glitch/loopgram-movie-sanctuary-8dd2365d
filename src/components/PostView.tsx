@@ -138,6 +138,11 @@ export function SourceBadge({ url, className = "" }: { url: string; className?: 
   return <span className={`rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary ${className}`}>{label}</span>;
 }
 
+/** Platform players start right away when opened (YouTube-style), no static preview screen. */
+export function withAutoplay(embed: string): string {
+  try { const u = new URL(embed); u.searchParams.set("autoplay", "1"); return u.toString(); } catch { return embed; }
+}
+
 /** True when a player message reports that the video can't play in the embed. */
 function isEmbedError(data: unknown): boolean {
   let d: unknown = data;
@@ -184,7 +189,7 @@ export function PostVideo({ url, poster }: { url: string; poster?: string }) {
     return (
       <div className="w-full bg-black sm:rounded-xl">
         <div className={`overflow-hidden ${box}`} style={vertical ? { height: "calc(100dvh - 3.5rem)", maxHeight: "none" } : undefined}>
-          <iframe src={src.embed} title={src.label} className="block h-full w-full border-0" allowFullScreen
+          <iframe src={withAutoplay(src.embed)} title={src.label} className="block h-full w-full border-0" allowFullScreen
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; web-share" referrerPolicy="strict-origin-when-cross-origin" />
         </div>
       </div>

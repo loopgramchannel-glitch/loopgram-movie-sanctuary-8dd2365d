@@ -6,7 +6,7 @@ import { AdSlot, useAdsAllowed } from "@/components/AdSlot";
 import { useAuth } from "@/hooks/useAuth";
 import { ArrowLeft, ChevronDown, ChevronUp, Home, Pause, Play, Share2, ThumbsDown, ThumbsUp, Volume2, VolumeX, X } from "lucide-react";
 import type { PostT } from "@/lib/posts";
-import { PostThumb, setCapturePaused } from "@/components/PostView";
+import { PostThumb, setCapturePaused, withAutoplay } from "@/components/PostView";
 import { parseVideoSource } from "@/lib/video-source";
 import { formatCount, viewsLabel } from "@/lib/post-stats";
 import { usePostEngagement } from "@/lib/use-post-stats";
@@ -197,7 +197,7 @@ function ShortSlide({ post, active, warm, muted, setMuted, onShare }: { post: Po
   return (
     <div className="relative h-full w-full sm:aspect-[9/16] sm:w-auto sm:max-w-full sm:overflow-hidden sm:rounded-xl">
       {src.embed ? (
-        active ? <iframe src={src.embed} title={post.title || "Short"} className="absolute inset-0 h-full w-full border-0" allowFullScreen
+        active ? <iframe src={withAutoplay(src.embed)} title={post.title || "Short"} className="absolute inset-0 h-full w-full border-0" allowFullScreen
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; web-share" referrerPolicy="strict-origin-when-cross-origin" />
           : <PostThumb post={post} className="absolute inset-0 h-full w-full" />
       ) : (
