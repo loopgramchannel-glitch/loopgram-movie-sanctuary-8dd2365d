@@ -56,7 +56,7 @@ export const studioUploadDone = createServerFn({ method: "POST" })
     // New owner video: queue adaptive-quality conversion. If the queue is down, the 10-minute scan still finds it.
     const { TRANSCODE_SOURCE } = await import("./jobs");
     let queued = false;
-    if (TRANSCODE_SOURCE.test(data.key)) { const { sendJob } = await import("./sqs.server"); queued = await sendJob({ kind: "transcode", key: data.key }); }
+    if (TRANSCODE_SOURCE.test(data.key)) { const { sendJob } = await import("./queue.server"); queued = await sendJob({ kind: "transcode", key: data.key }); }
     const { audit } = await import("./auth.server");
     await audit(me, "media.upload.done", data.key, "ok", { transcodeQueued: queued });
     return { ok: true };

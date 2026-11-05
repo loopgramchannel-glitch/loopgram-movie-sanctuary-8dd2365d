@@ -62,7 +62,7 @@ export const studioHealth = createServerFn({ method: "POST" }).inputValidator((d
     timed("Firebase Authentication", ["FIREBASE_PROJECT_ID", "FIREBASE_PRIVATE_KEY"], async () => { const { idt } = await import("./auth.server"); await idt("accounts:query", { returnUserInfo: false, limit: "1" }); }),
     timed("Upstash Redis", ["UPSTASH_REDIS_REST_URL"], async () => { if ((await b.redis(["PING"])) !== "PONG") throw new Error("no PONG"); }),
     timed("DynamoDB", ["DYNAMODB_TABLE_NAME", "AWS_SECRET_ACCESS_KEY"], () => b.dynamo("DescribeTable", { TableName: process.env["DYNAMODB_TABLE_NAME"] })),
-    timed("Amazon SQS", ["SQS_QUEUE_URL"], async () => { const { queueStats } = await import("./sqs.server"); await queueStats(); }),
+    timed("Amazon SQS", ["SQS_QUEUE_URL"], async () => { const { queueStats } = await import("./queue.server"); await queueStats(); }),
     timed("Cloudflare R2", ["R2_ENDPOINT", "R2_SECRET_ACCESS_KEY"], () => listR2("", 1)),
     timed("Algolia", ["ALGOLIA_APP_ID", "ALGOLIA_ADMIN_API_KEY"], async () => {
       const r = await fetch(`https://${process.env["ALGOLIA_APP_ID"]}-dsn.algolia.net/1/indexes?page=0&hitsPerPage=1`, { headers: { "X-Algolia-Application-Id": process.env["ALGOLIA_APP_ID"]!, "X-Algolia-API-Key": process.env["ALGOLIA_ADMIN_API_KEY"]! }, signal: AbortSignal.timeout(5000) });
@@ -80,7 +80,7 @@ export const studioOverview = createServerFn({ method: "POST" }).inputValidator(
   const { redis } = await import("./backend.server");
   const [accounts, queue, audit] = await Promise.all([
     idt<{ recordsCount?: string }>("accounts:query", { returnUserInfo: false }).then((r) => Number(r.recordsCount ?? 0)).catch(() => null),
-    import("./sqs.server").then((m) => m.queueStats()).catch(() => null),
+    import("./queue.server").then((m) => m.queueStats()).catch(() => null),
     redis(["LRANGE", "studio:audit", 0, 9]).then((r) => ((r as string[] | null) ?? []).map((x) => JSON.parse(x))).catch(() => []),
   ]);
   return { accounts, queue, audit, settings: await readSettings() };
@@ -162,15 +162,15 @@ export const studioSearch = createServerFn({ method: "POST" }).inputValidator((d
 
 export const studioJobs = createServerFn({ method: "POST" }).inputValidator((d: unknown) => tok.extend({ process: z.boolean().default(false) }).parse(d)).handler(async ({ data }) => {
   const me = await owner(data.token);
-  const sqs = await import("./sqs.server");
+  const q = await import("./queue.server");
   const { audit } = await import("./auth.server");
   let processed: unknown = null;
   if (data.process) {
     const { handleSearchJob } = await import("./algolia.server");
-    try { processed = await sqs.processBatch(handleSearchJob, 10); await audit(me, "jobs.process", "sqs", "ok"); }
-    catch (e) { await audit(me, "jobs.process", "sqs", "failed"); throw new Error("502: Queue unavailable (check AWS permissions)."); }
+    try { processed = await q.processBatch(handleSearchJob, 10); await audit(me, "jobs.process", "queue", "ok"); }
+    catch (e) { await audit(me, "jobs.process", "queue", "failed"); throw new Error("502: Queue unavailable (check the D1 database key)."); }
   }
-  const stats = await sqs.queueStats().catch(() => null);
+  const stats = await q.queueStats().catch(() => null);
   return { stats, processed: JSON.parse(JSON.stringify(processed)) };
 });
 

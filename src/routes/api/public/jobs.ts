@@ -24,7 +24,7 @@ export const Route = createFileRoute("/api/public/jobs")({
           await flushLogs();
           return Response.json({ ok: !("error" in r), result: r });
         }
-        const { processBatch, queueStats } = await import("@/lib/sqs.server");
+        const { processBatch, queueStats } = await import("@/lib/queue.server");
         const { handleSearchJob } = await import("@/lib/algolia.server");
         try {
           const batch = await processBatch((j) => handleSearchJob(j));
