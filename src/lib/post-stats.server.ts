@@ -1,14 +1,21 @@
-// Post views & likes engine. Redis (Upstash) is the live counter; DynamoDB keeps the permanent total.
-// Hot paths are batched per isolate so a viral video costs ~1 storage write per few seconds, not 1 per tap.
-import { dynamo, redis, redisPipeline, redisPipelineChecked } from "./backend.server";
+// Post views & likes engine. Redis (Upstash) is the live counter; Cloudflare D1 keeps the permanent total forever.
+// Hot paths are batched (job queue + per-isolate buffer) so a viral video costs ~1 storage write per few seconds, not 1 per tap.
+import { d1, d1Batch, redis, redisPipeline, redisPipelineChecked, type D1Stmt } from "./backend.server";
 import { VIEW_DEDUPE_S, voteDelta, type PostStats, type Vote } from "./post-stats";
 import { coalesceStats, type StatJob } from "./jobs";
 
-const env = (k: string) => process.env[k] ?? "";
 const H = (id: string) => `ps:${id}`; // hash: v (views), l (likes), d (dislikes)
 const FLUSH_MS = 5_000;
 
-// ---- Durable batching to DynamoDB (PK POSTSTAT#<id>, SK STATS) ----
+/** One atomic upsert adding deltas to a post's permanent total (D1 table post_stats). */
+const addStmt = (id: string, v: number, l: number, d: number, now = Date.now()): D1Stmt => ({
+  sql: `INSERT INTO post_stats (post_id, views, likes, dislikes, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(post_id) DO UPDATE SET views = views + excluded.views, likes = likes + excluded.likes,
+        dislikes = dislikes + excluded.dislikes, updated_at = excluded.updated_at`,
+  params: [id, v, l, d, now],
+});
+
+// ---- Durable batching to D1 ----
 const pending = new Map<string, { v: number; l: number; d: number }>();
 let lastFlush = 0;
 async function flushDurable(force = false) {
@@ -16,20 +23,8 @@ async function flushDurable(force = false) {
   if (!pending.size || (!force && now - lastFlush < FLUSH_MS)) return;
   lastFlush = now;
   const batch = [...pending]; pending.clear();
-  await Promise.all(batch.map(async ([id, c]) => {
-    try {
-      await dynamo("UpdateItem", {
-        TableName: env("DYNAMODB_TABLE_NAME"),
-        Key: { PK: { S: `POSTSTAT#${id}` }, SK: { S: shardSk(Math.floor(Math.random() * SHARDS)) } },
-        UpdateExpression: "ADD #v :v, #l :l, #d :d SET #u = :u",
-        ExpressionAttributeNames: { "#v": "views", "#l": "likes", "#d": "dislikes", "#u": "updated_at" },
-        ExpressionAttributeValues: { ":v": { N: String(c.v) }, ":l": { N: String(c.l) }, ":d": { N: String(c.d) }, ":u": { N: String(now) } },
-      });
-    } catch {
-      const p = pending.get(id) ?? { v: 0, l: 0, d: 0 }; // keep for the next flush
-      pending.set(id, { v: p.v + c.v, l: p.l + c.l, d: p.d + c.d });
-    }
-  }));
+  try { await d1Batch(batch.map(([id, c]) => addStmt(id, c.v, c.l, c.d, now))); }
+  catch { for (const [id, c] of batch) addPending(id, c.v, c.l, c.d); } // keep for the next flush
 }
 function addPending(id: string, v: number, l: number, d: number) {
   const p = pending.get(id) ?? { v: 0, l: 0, d: 0 };
@@ -45,74 +40,54 @@ function allow(key: string, max: number, windowMs = 60_000) {
   return ++h.n <= max;
 }
 
-// ---- DynamoDB direct path: used when Redis is down or over its plan limit ----
-// Counter sharding (YouTube-style): direct writes spread over SHARDS rows (SK STATS, STATS#1..n-1)
-// so a viral post never hammers one row; reads sum every shard.
-export const SHARDS = 10;
-export const shardSk = (n: number) => (n === 0 ? "STATS" : `STATS#${n}`);
-const T = () => env("DYNAMODB_TABLE_NAME");
-const statKey = (id: string, shard = 0) => ({ PK: { S: `POSTSTAT#${id}` }, SK: { S: shardSk(shard) } });
-/** Sums all shard rows for each id (BatchGetItem, 100 keys per call). */
-async function sumShards(ids: string[]): Promise<Map<string, { views: number; likes: number; dislikes: number; found: boolean }>> {
-  const out = new Map<string, { views: number; likes: number; dislikes: number; found: boolean }>();
+type Totals = { views: number; likes: number; dislikes: number; found: boolean };
+async function readTotals(ids: string[]): Promise<Map<string, Totals>> {
+  const out = new Map<string, Totals>();
   for (const id of ids) out.set(id, { views: 0, likes: 0, dislikes: 0, found: false });
-  const keys = ids.flatMap((id) => Array.from({ length: SHARDS }, (_, n) => statKey(id, n)));
-  for (let i = 0; i < keys.length; i += 100) {
-    const r = await dynamo("BatchGetItem", { RequestItems: { [T()]: { Keys: keys.slice(i, i + 100) } } });
-    for (const it of (r.Responses?.[T()] ?? []) as any[]) {
-      const s = out.get(String(it.PK.S).slice(9)); if (!s) continue;
-      s.found = true;
-      s.views += Number(it.views?.N) || 0; s.likes += Number(it.likes?.N) || 0; s.dislikes += Number(it.dislikes?.N) || 0;
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    const r = await d1<{ post_id: string; views: number; likes: number; dislikes: number }>(
+      `SELECT post_id, views, likes, dislikes FROM post_stats WHERE post_id IN (${chunk.map((_, n) => `?${n + 1}`).join(",")})`, chunk);
+    for (const it of r.results) {
+      const s = out.get(it.post_id); if (!s) continue;
+      s.found = true; s.views = Number(it.views) || 0; s.likes = Number(it.likes) || 0; s.dislikes = Number(it.dislikes) || 0;
     }
   }
   return out;
 }
 async function dynAdd(id: string, v: number, l: number, d: number) {
-  await dynamo("UpdateItem", {
-    TableName: T(), Key: statKey(id, Math.floor(Math.random() * SHARDS)),
-    UpdateExpression: "ADD #v :v, #l :l, #d :d SET #u = :u",
-    ExpressionAttributeNames: { "#v": "views", "#l": "likes", "#d": "dislikes", "#u": "updated_at" },
-    ExpressionAttributeValues: { ":v": { N: String(v) }, ":l": { N: String(l) }, ":d": { N: String(d) }, ":u": { N: String(Date.now()) } },
-  });
-  const s = (await sumShards([id])).get(id)!;
-  return { views: Math.max(0, s.views), likes: Math.max(0, s.likes) };
+  const [, r] = await d1Batch([addStmt(id, v, l, d), { sql: "SELECT views, likes FROM post_stats WHERE post_id = ?1", params: [id] }]);
+  const row = (r?.results[0] ?? {}) as { views?: number; likes?: number };
+  return { views: Math.max(0, Number(row.views) || 0), likes: Math.max(0, Number(row.likes) || 0) };
 }
-// ---- High-traffic path: deltas go to the SQS queue, the worker sums them into one write per post ----
-/** Queues a like/view delta; if the queue is unavailable it is written to DynamoDB right away (never lost). */
+// ---- High-traffic path: deltas go to the D1 job queue, the heartbeat sums them into one write per post ----
+/** Queues a like/view delta; if the queue is unavailable it is written to D1 right away (never lost). */
 async function queueStat(id: string, v: number, l: number, d: number) {
-  const { sendJob } = await import("./sqs.server");
+  const { sendJob } = await import("./queue.server");
   const ok = await sendJob({ kind: "poststat", bid: crypto.randomUUID(), id, views: v, likes: l, dislikes: d });
   if (!ok) await dynAdd(id, v, l, d).catch(() => addPending(id, v, l, d));
 }
-const MARK_TTL_S = 7 * 86400;
-function statTx(jobs: StatJob[]) {
-  const now = Date.now(); const exp = String(Math.floor(now / 1000) + MARK_TTL_S);
-  const marks = jobs.map((j) => ({ Put: {
-    TableName: T(), Item: { PK: { S: `STATJOB#${j.bid}` }, SK: { S: "DONE" }, exp: { N: exp } },
-    ConditionExpression: "attribute_not_exists(PK)",
-  } }));
-  const adds = [...coalesceStats(jobs)].map(([id, c]) => ({ Update: {
-    TableName: T(), Key: statKey(id),
-    UpdateExpression: "ADD #v :v, #l :l, #d :d SET #u = :u",
-    ExpressionAttributeNames: { "#v": "views", "#l": "likes", "#d": "dislikes", "#u": "updated_at" },
-    ExpressionAttributeValues: { ":v": { N: String(c.views) }, ":l": { N: String(c.likes) }, ":d": { N: String(c.dislikes) }, ":u": { N: String(now) } },
-  } }));
-  return dynamo("TransactWriteItems", { TransactItems: [...marks, ...adds] });
-}
-/** Worker side: applies a batch of queued deltas exactly once (a done-marker per message, same transaction). */
+/** Worker side: applies a batch of queued deltas exactly once (done-marker per message in the same transaction). */
 export async function applyStatJobs(jobs: StatJob[]) {
-  try { await statTx(jobs); }
-  catch (e) {
-    if (!/TransactionCanceled/.test(String(e))) throw e;
-    // A message in the batch was already applied (redelivery): apply the rest one by one.
-    for (const j of jobs) {
-      try { await statTx([j]); } catch (e2) { if (!/TransactionCanceled/.test(String(e2))) throw e2; }
-    }
+  if (!jobs.length) return;
+  const now = Date.now();
+  // Only jobs whose done-marker is new get applied: INSERT OR IGNORE + a check in the same transaction.
+  const fresh: StatJob[] = [];
+  const seen = await d1<{ bid: string }>(`SELECT bid FROM stat_jobs_done WHERE bid IN (${jobs.map((_, n) => `?${n + 1}`).join(",")})`, jobs.map((j) => j.bid));
+  const done = new Set(seen.results.map((r) => r.bid));
+  for (const j of jobs) if (!done.has(j.bid)) fresh.push(j);
+  if (fresh.length) {
+    await d1Batch([
+      ...fresh.map((j) => ({ sql: "INSERT OR IGNORE INTO stat_jobs_done (bid, done_at) VALUES (?1, ?2)", params: [j.bid, now] })),
+      ...[...coalesceStats(fresh)].map(([id, c]) => addStmt(id, c.views, c.likes, c.dislikes, now)),
+    ]);
   }
+  // Done-markers only need to outlive redelivery; trim week-old ones occasionally.
+  if (Math.random() < 0.02) void d1("DELETE FROM stat_jobs_done WHERE done_at < ?1", [now - 7 * 86400_000]).catch(() => {});
   for (const j of jobs) memo.delete(j.id);
 }
 
-// When Redis fails once (down / over plan limit), use DynamoDB only for 60s so one tap never mixes stores.
+// When Redis fails once (down / over plan limit), use D1 only for 60s so one tap never mixes stores.
 let redisDownUntil = 0;
 async function live(cmds: (string | number)[][]): Promise<unknown[] | null> {
   if (Date.now() < redisDownUntil) return null;
@@ -121,26 +96,27 @@ async function live(cmds: (string | number)[][]): Promise<unknown[] | null> {
   return r.out;
 }
 
-/** Counts one real view. Same viewer within 30 min = one view (Redis SET NX, or a DynamoDB conditional put). */
+/** Counts one real view. Same viewer within 30 min = one view (Redis SET NX, or a D1 conditional upsert). */
 export async function recordView(id: string, viewer: string, ip: string): Promise<{ counted: boolean }> {
   if (!allow(`v:${ip}`, 120)) return { counted: false };
   const r0 = await live([["SET", `pvw:${id}:${viewer}`, "1", "NX", "EX", VIEW_DEDUPE_S]]);
   if (r0) {
     if (r0[0] !== "OK") return { counted: false };
     await redis(["HINCRBY", H(id), "v", 1]);
-    await queueStat(id, 1, 0, 0); // permanent total via the SQS queue (direct write if the queue is down)
+    await queueStat(id, 1, 0, 0); // permanent total via the D1 job queue (direct write if the queue is down)
     memo.delete(id);
     void flushDurable().catch(() => {}); // retries leftovers only; never blocks the tap
     return { counted: true };
   }
   const now = Math.floor(Date.now() / 1000);
   try {
-    await dynamo("PutItem", {
-      TableName: T(), Item: { PK: { S: `POSTVIEW#${id}` }, SK: { S: viewer }, exp: { N: String(now + VIEW_DEDUPE_S) } },
-      ConditionExpression: "attribute_not_exists(PK) OR #e < :n",
-      ExpressionAttributeNames: { "#e": "exp" }, ExpressionAttributeValues: { ":n": { N: String(now) } },
-    });
-  } catch { return { counted: false }; } // condition failed (already counted) or DynamoDB down
+    const r = await d1(
+      `INSERT INTO post_views (post_id, viewer, expires_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(post_id, viewer) DO UPDATE SET expires_at = excluded.expires_at WHERE post_views.expires_at < ?4`,
+      [id, viewer, now + VIEW_DEDUPE_S, now]);
+    if (!r.meta.changes) return { counted: false }; // already counted in this window
+    if (Math.random() < 0.01) void d1("DELETE FROM post_views WHERE expires_at < ?1", [now]).catch(() => {});
+  } catch { return { counted: false }; } // D1 down
   try { await dynAdd(id, 1, 0, 0); } catch { return { counted: false }; }
   memo.delete(id);
   return { counted: true };
@@ -158,37 +134,41 @@ export async function setVote(id: string, viewer: string, ip: string, vote: Vote
     if (d.likes) cmds.push(["HINCRBY", H(id), "l", d.likes]);
     if (d.dislikes) cmds.push(["HINCRBY", H(id), "d", d.dislikes]);
     const out = cmds.length ? await redisPipeline(cmds) : [];
-    // Permanent record in DynamoDB: this viewer's thumb + the total, written immediately.
-    const vk = { PK: { S: `POSTVOTE#${id}` }, SK: { S: viewer } };
-    await (vote === 0 ? dynamo("DeleteItem", { TableName: T(), Key: vk }) : dynamo("PutItem", { TableName: T(), Item: { ...vk, vote: { N: String(vote) } } })).catch(() => {});
+    // Permanent record in D1: this viewer's thumb (the total follows via the queue).
+    await saveVote(id, viewer, vote).catch(() => {});
     if (d.likes || d.dislikes) await queueStat(id, 0, d.likes, d.dislikes);
     memo.delete(id);
     void flushDurable().catch(() => {});
     const likes = d.likes ? Number(out[0]) : Number(await redis(["HGET", H(id), "l"]));
     return { vote, likes: Math.max(0, likes || 0) };
   }
-  // Redis unavailable: keep the vote and the totals in DynamoDB directly.
-  const vk = { PK: { S: `POSTVOTE#${id}` }, SK: { S: viewer } };
-  const r = vote === 0
-    ? await dynamo("DeleteItem", { TableName: T(), Key: vk, ReturnValues: "ALL_OLD" })
-    : await dynamo("PutItem", { TableName: T(), Item: { ...vk, vote: { N: String(vote) } }, ReturnValues: "ALL_OLD" });
-  const prev = (Number(r.Attributes?.vote?.N) || 0) as Vote;
+  // Redis unavailable: keep the vote and the totals in D1 directly.
+  const [old] = await d1Batch([
+    { sql: "SELECT vote FROM post_votes WHERE post_id = ?1 AND viewer = ?2", params: [id, viewer] },
+    voteStmt(id, viewer, vote),
+  ]);
+  const prev = (Number((old?.results[0] as { vote?: number } | undefined)?.vote) || 0) as Vote;
   const d = voteDelta(prev, vote);
   const s = await dynAdd(id, 0, d.likes, d.dislikes);
   memo.delete(id);
   return { vote, likes: s.likes };
 }
 
+const voteStmt = (id: string, viewer: string, vote: Vote): D1Stmt => vote === 0
+  ? { sql: "DELETE FROM post_votes WHERE post_id = ?1 AND viewer = ?2", params: [id, viewer] }
+  : { sql: "INSERT INTO post_votes (post_id, viewer, vote, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(post_id, viewer) DO UPDATE SET vote = excluded.vote, updated_at = excluded.updated_at", params: [id, viewer, vote, Date.now()] };
+async function saveVote(id: string, viewer: string, vote: Vote) { await d1Batch([voteStmt(id, viewer, vote)]); }
+
 export async function getVote(id: string, viewer: string): Promise<Vote> {
   const r0 = await live([["GET", `pvt:${id}:${viewer}`]]);
   if (r0) return (Number(r0[0]) || 0) as Vote;
   try {
-    const r = await dynamo("GetItem", { TableName: T(), Key: { PK: { S: `POSTVOTE#${id}` }, SK: { S: viewer } } });
-    return (Number(r.Item?.vote?.N) || 0) as Vote;
+    const r = await d1<{ vote: number }>("SELECT vote FROM post_votes WHERE post_id = ?1 AND viewer = ?2", [id, viewer]);
+    return (Number(r.results[0]?.vote) || 0) as Vote;
   } catch { return 0; }
 }
 
-// ---- Reads: per-isolate 10s memo, one pipelined Redis call, DynamoDB fallback (and re-seed) ----
+// ---- Reads: per-isolate 10s memo, one pipelined Redis call, D1 fallback (and re-seed) ----
 const memo = new Map<string, { v: PostStats; exp: number }>();
 export async function readStats(ids: string[]): Promise<Record<string, PostStats>> {
   const out: Record<string, PostStats> = {};
@@ -203,7 +183,7 @@ export async function readStats(ids: string[]): Promise<Record<string, PostStats
     });
     if (missing.length) {
       try {
-        const sums = await sumShards(missing.slice(0, 100));
+        const sums = await readTotals(missing.slice(0, 100));
         const seed: (string | number)[][] = [];
         for (const [id, t] of sums) {
           if (!t.found) continue;
